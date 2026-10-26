@@ -193,6 +193,7 @@ struct DeviceMetrics
 	std::map<uint32_t, std::vector<double>> vrTempPerTile; // tile_id -> voltage regulator temp samples in Celsius
 	std::map<uint32_t, std::vector<double>> compositeTempPerTile; // tile_id -> composite temp samples in Celsius
 	std::map<uint32_t, std::vector<double>> fanSpeedPercentSamplesPerFan; // fan_id -> fan speed samples in percent
+	std::map<uint32_t, std::vector<double>> fanSpeedRpmSamplesPerFan; // fan_id -> RPM samples, for fans with no percent
 
 	std::map<uint32_t, std::vector<double>> memoryReadKBpsPerTile;	// tile_id -> read throughput samples in kB/s
 	std::map<uint32_t, std::vector<double>> memoryWriteKBpsPerTile; // tile_id -> write throughput samples in kB/s
@@ -257,7 +258,8 @@ private:
 	static void addPerTileMetricRows(TableBuilder &table, const nlohmann::ordered_json &json, const std::string &label,
 									 const std::vector<std::string> &path, int precision = 0);
 	static void addPerFanMetricRows(TableBuilder &table, const nlohmann::ordered_json &json, const std::string &label,
-									const std::vector<std::string> &path, int precision = 0);
+									const std::vector<std::string> &path, int precision = 0,
+									const std::string &unitSuffix = "%");
 	static void addMetricRow(TableBuilder &table, const nlohmann::ordered_json &deviceJson, const std::string &label,
 							 const std::vector<std::string> &path);
 	static void addEngineInstanceRows(TableBuilder &table, const nlohmann::ordered_json &deviceJson,
@@ -337,7 +339,8 @@ private:
 														std::map<uint32_t, std::vector<double>> &vrTempPerTile,
 														std::map<uint32_t, std::vector<double>> &compositeTempPerTile);
 	static ze_result_t collectFanMetrics(fan *fanHandler,
-										 std::map<uint32_t, std::vector<double>> &fanSpeedPercentSamplesPerFan);
+										 std::map<uint32_t, std::vector<double>> &fanSpeedPercentSamplesPerFan,
+										 std::map<uint32_t, std::vector<double>> &fanSpeedRpmSamplesPerFan);
 	static ze_result_t
 	collectMemoryMetricsPerTile(memory *memoryHandler, bool isIGPU, TileMemoryBandwidthSnapshot &baseline,
 								std::map<uint32_t, std::vector<double>> &memoryReadKBpsPerTile,

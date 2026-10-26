@@ -52,17 +52,21 @@ static std::string fmtMem(double usedMiB, double totalMiB)
 }
 
 /**
- * @brief Format fan telemetry string from percent value only.
+ * @brief Format fan telemetry string.
  *
- * @param[in] pct Fan speed percentage, or negative when unavailable.
+ * @param[in] speed Fan speed, or negative when unavailable.
+ * @param[in] units Units of @p speed: a percentage, or RPM when the fan reports no maximum.
  * @return std::string Formatted fan string for the SMI table.
  */
-static std::string fmtFan(int32_t pct)
+static std::string fmtFan(int32_t speed, zes_fan_speed_units_t units)
 {
-	if (pct >= 0) {
-		return xpum::compat::format("{}%", pct);
+	if (speed < 0) {
+		return "N/A";
 	}
-	return "N/A";
+	if (units == ZES_FAN_SPEED_UNITS_RPM) {
+		return xpum::compat::format("{}RPM", speed);
+	}
+	return xpum::compat::format("{}%", speed);
 }
 
 static std::string processTypeFromEngines(uint64_t engines, uint64_t memSizeKiB, uint64_t sharedSizeKiB)
@@ -137,7 +141,7 @@ void cmdSmi::collectStaticProps(SmiDeviceStats &stats, devInfo *di)
 }
 
 /**
- * @brief Read current fan speed (%) if the device has fans.
+ * @brief Read current fan speed (%, or RPM when no percentage can be derived) if the device has fans.
  */
 void cmdSmi::collectFan(SmiDeviceStats &stats, devInfo *di)
 {
@@ -147,10 +151,11 @@ void cmdSmi::collectFan(SmiDeviceStats &stats, devInfo *di)
 		return;
 	}
 
-	// Collect fan speed as percentage
-	int32_t pct = -1;
-	if (fanHandler->getSpeedPercent(pct) == ZE_RESULT_SUCCESS) {
-		stats.fanSpeedPct = pct;
+	int32_t speed = -1;
+	zes_fan_speed_units_t units = ZES_FAN_SPEED_UNITS_PERCENT;
+	if (fanHandler->getSpeed(speed, units) == ZE_RESULT_SUCCESS) {
+		stats.fanSpeed = speed;
+		stats.fanSpeedUnits = units;
 		stats.fanValid = true;
 	}
 }
@@ -426,7 +431,7 @@ TableBuilder cmdSmi::buildGpuTable(const std::vector<SmiDeviceStats> &devStats, 
 
 		// Row 2: live telemetry per column
 		std::string tempStr = s.tempValid ? xpum::compat::format("{:.0f}C", s.gpuTempC) : "N/A";
-		std::string fanStr = s.fanValid ? fmtFan(s.fanSpeedPct) : "N/A";
+		std::string fanStr = s.fanValid ? fmtFan(s.fanSpeed, s.fanSpeedUnits) : "N/A";
 		std::string pwrStr = fmtPower(s.powerValid ? s.powerCurrentW : 0.0, s.powerTdpW);
 		std::string fanTempPwrLine =
 			xpum::compat::format("{:<{}}  {:>{}}  {}", fanStr, fanDisplayWidth, tempStr, tempDisplayWidth, pwrStr);

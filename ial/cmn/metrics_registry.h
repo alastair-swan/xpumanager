@@ -92,7 +92,7 @@ enum class MetricGroup : uint32_t
 	PCI = 1U << 6,		   /**< pci.*, pcie.link.*, pcie.tx/rx.throughput, pcie.replay */
 	ECC = 1U << 7,		   /**< ecc.mode.current, ecc.errors.corrected/uncorrected; analogous to dmon -s e */
 	EU_ARRAY = 1U << 8,	   /**< eu.active/stall/idle (Intel Xe-only) */
-	FAN = 1U << 9,		   /**< fan.speed */
+	FAN = 1U << 9,		   /**< fan.speed, fan.speed.rpm */
 	ALL = ~0U,
 };
 

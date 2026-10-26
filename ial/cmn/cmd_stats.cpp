@@ -546,10 +546,13 @@ ze_result_t cmdStats::collectTemperatureMetricsPerTile(temperature *tempHandler,
  *
  * @param [in] fanHandler The HAL fan instance
  * @param [out] fanSpeedPercentSamplesPerFan Map of fan_id -> fan speed percentage samples (0-100)
+ * @param [out] fanSpeedRpmSamplesPerFan Map of fan_id -> fan speed RPM samples, for fans that
+ *              report no maximum to express a percentage of
  * @return ze_result_t ZE_RESULT_SUCCESS if collection successful
  */
 ze_result_t cmdStats::collectFanMetrics(fan *fanHandler,
-										std::map<uint32_t, std::vector<double>> &fanSpeedPercentSamplesPerFan)
+										std::map<uint32_t, std::vector<double>> &fanSpeedPercentSamplesPerFan,
+										std::map<uint32_t, std::vector<double>> &fanSpeedRpmSamplesPerFan)
 {
 	TRACING();
 	if (fanHandler == nullptr) {
@@ -564,11 +567,18 @@ ze_result_t cmdStats::collectFanMetrics(fan *fanHandler,
 	}
 
 	for (uint32_t fanId = 0; fanId < fanCount; ++fanId) {
-		int32_t fanPct = 0;
-		result = fanHandler->getSpeedPercentById(fanId, fanPct);
-		if (result == ZE_RESULT_SUCCESS && fanPct >= 0) {
-			fanSpeedPercentSamplesPerFan[fanId].push_back(static_cast<double>(fanPct));
-			DBG("Fan {} speed percentage sample: {:.1f}%\n", fanId, static_cast<double>(fanPct));
+		int32_t speed = 0;
+		zes_fan_speed_units_t units = ZES_FAN_SPEED_UNITS_PERCENT;
+		result = fanHandler->getSpeedById(fanId, speed, units);
+		if (result != ZE_RESULT_SUCCESS || speed < 0) {
+			continue;
+		}
+		if (units == ZES_FAN_SPEED_UNITS_RPM) {
+			fanSpeedRpmSamplesPerFan[fanId].push_back(static_cast<double>(speed));
+			DBG("Fan {} speed RPM sample: {}\n", fanId, speed);
+		} else {
+			fanSpeedPercentSamplesPerFan[fanId].push_back(static_cast<double>(speed));
+			DBG("Fan {} speed percentage sample: {:.1f}%\n", fanId, static_cast<double>(speed));
 		}
 	}
 
@@ -1250,7 +1260,7 @@ ze_result_t cmdStats::collectDeviceStats(devInfo *device, size_t sampleCount, st
 									   metrics.memoryFrequencyPerTile, metrics.memoryVoltagePerTile);
 		collectTemperatureMetricsPerTile(tempHandler, metrics.gpuCoreTempPerTile, metrics.memoryTempPerTile,
 										 metrics.vrTempPerTile, metrics.compositeTempPerTile);
-		collectFanMetrics(fanHandler, metrics.fanSpeedPercentSamplesPerFan);
+		collectFanMetrics(fanHandler, metrics.fanSpeedPercentSamplesPerFan, metrics.fanSpeedRpmSamplesPerFan);
 		collectMemoryMetricsPerTile(memoryHandler, dev->isIGPU(), memoryBaseline, metrics.memoryReadKBpsPerTile,
 									metrics.memoryWriteKBpsPerTile, metrics.memoryBandwidthPercentPerTile,
 									metrics.memoryUsedMiBPerTile, metrics.memoryUtilPercentPerTile);
@@ -1534,6 +1544,14 @@ ze_result_t cmdStats::collectDeviceStats(devInfo *device, size_t sampleCount, st
 		}
 	}
 
+	for (const auto &[fanId, samples] : metrics.fanSpeedRpmSamplesPerFan) {
+		SummaryStats stats = computeSummaryStats(samples);
+		if (stats.valid) {
+			std::string fanKey = xpum::compat::format("fan_{}", fanId);
+			populateSummaryStatsJson(deviceJson["fan"]["speed_rpm"][fanKey], stats);
+		}
+	}
+
 	for (const auto &[tileId, samples] : metrics.gpuUtilPerTile) {
 		SummaryStats stats = computeSummaryStats(samples);
 		if (stats.valid) {
@@ -1798,7 +1816,14 @@ void StatsTextPrinter::printDeviceTable(const nlohmann::ordered_json &deviceJson
 	addPerTileMetricRows(table, deviceJson, "GPU Composite Temperature", {"temperature", "composite_celsius"}, 0);
 	table.addRow("(Degrees Celsius)", "");
 
-	addPerFanMetricRows(table, deviceJson, "Fan Speed (%)", {"fan", "speed_percent"}, 0);
+	// Fans that report no maximum speed only have RPM; show that rather than an N/A percentage.
+	const bool hasFanRpm = getNestedJson(deviceJson, {"fan", "speed_rpm"}) != nullptr;
+	if (!hasFanRpm || getNestedJson(deviceJson, {"fan", "speed_percent"}) != nullptr) {
+		addPerFanMetricRows(table, deviceJson, "Fan Speed (%)", {"fan", "speed_percent"}, 0);
+	}
+	if (hasFanRpm) {
+		addPerFanMetricRows(table, deviceJson, "Fan Speed (RPM)", {"fan", "speed_rpm"}, 0, "");
+	}
 
 	addPerTileMetricRows(table, deviceJson, "GPU Memory Read (kB/s)", {"memory", "read_kbps"}, 0);
 
@@ -1926,10 +1951,11 @@ void StatsTextPrinter::addPerTileMetricRows(TableBuilder &table, const nlohmann:
  * @param [in] label Row label for the metric.
  * @param [in] path Nested JSON path to the metric object.
  * @param [in] precision Decimal places for formatting values.
+ * @param [in] unitSuffix Text appended to each value, e.g. "%" or " RPM".
  */
 void StatsTextPrinter::addPerFanMetricRows(TableBuilder &table, const nlohmann::ordered_json &json,
 										   const std::string &label, const std::vector<std::string> &path,
-										   int precision)
+										   int precision, const std::string &unitSuffix)
 {
 	const nlohmann::ordered_json *metricPtr = getNestedJson(json, path);
 	if (metricPtr == nullptr) {
@@ -1979,7 +2005,7 @@ void StatsTextPrinter::addPerFanMetricRows(TableBuilder &table, const nlohmann::
 
 		std::ostringstream oss;
 		oss << std::fixed << std::setprecision(precision);
-		oss << "Fan " << fanId << ": " << value << "%";
+		oss << "Fan " << fanId << ": " << value << unitSuffix;
 
 		if (firstFan) {
 			table.addRow(label, oss.str());

@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <functional>
+#include <string>
 
 #define POWER_MONITOR_INTERNAL_PERIOD 80
 #define DEFAULT_THROTTLE_POWER 300
@@ -66,6 +67,12 @@ private:
 	std::array<bool, 2> energyDomainMissingLogged;
 	/** Same, for the getEnergyPerTile() notice, which a stats run repeats per sample. */
 	bool perTileEnergyDomainMissingLogged;
+	/** hwmon directory of the device's DRM driver, or empty when it has none. Read when sysman
+	 *  refuses an energy counter for lack of privilege (its PMT source is root-only). */
+	std::string hwmonDir;
+
+	ze_result_t readEnergyCounter(zes_pwr_handle_t powerHandle, zes_power_domain_t domain,
+								  zes_power_energy_counter_t *energyCounter);
 
 public:
 	power();
@@ -112,6 +119,7 @@ public:
 	ze_result_t init(zes_device_handle_t zeDevice) override;
 	ze_result_t init(zes_device_handle_t zeDevice, class device *device);
 	ze_result_t zesRun(zes_device_handle_t device) override;
+	void setPciBdf(const std::string &bdf);
 };
 
 #endif

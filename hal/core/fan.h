@@ -22,11 +22,14 @@ private:
 	zes_fan_config_t *fanConfigCache;
 	bool *fanConfigCached;
 	uint64_t *fanConfigCachedAtMs;
+	int32_t *fanRpmCache;
+	uint64_t *fanRpmCachedAtMs;
 	void clearFanHandles();
 	ze_result_t ensureFansEnumerated();
 	ze_result_t resolveTargetFanIndexes(int32_t fanId, std::vector<uint32_t> &targetIndexes);
 	ze_result_t getPropertiesById(uint32_t fanId, zes_fan_properties_t &props);
 	ze_result_t getConfigById(uint32_t fanId, zes_fan_config_t &config);
+	ze_result_t getRpmById(uint32_t fanId, int32_t &rpm);
 	void invalidateFanConfigCacheById(uint32_t fanId);
 	uint64_t getMonotonicMs() const;
 	void printSupportedModes(const uint32_t mode);
@@ -36,7 +39,8 @@ private:
 public:
 	fan()
 		: deviceHandle(nullptr), fanCount(0), fanHandles(nullptr), fanPropsCache(nullptr), fanPropsCached(nullptr),
-		  fanConfigCache(nullptr), fanConfigCached(nullptr), fanConfigCachedAtMs(nullptr)
+		  fanConfigCache(nullptr), fanConfigCached(nullptr), fanConfigCachedAtMs(nullptr), fanRpmCache(nullptr),
+		  fanRpmCachedAtMs(nullptr)
 	{}
 	~fan();
 	ze_result_t getConfig(zes_fan_config_t &config, int32_t fanId = 0);
@@ -44,6 +48,9 @@ public:
 
 	ze_result_t init(zes_device_handle_t device) override;
 	ze_result_t zesRun(zes_device_handle_t device) override;
+	ze_result_t getSpeedById(uint32_t fanId, int32_t &speed, zes_fan_speed_units_t &units);
+	ze_result_t getSpeed(int32_t &speed, zes_fan_speed_units_t &units);
+	ze_result_t getSpeedRpm(int32_t &rpm);
 	ze_result_t getSpeedPercentById(uint32_t fanId, int32_t &pct);
 	ze_result_t getSpeedPercent(int32_t &pct);
 	ze_result_t setFixedSpeedPercent(int32_t speedPercent, int32_t fanId = -1);

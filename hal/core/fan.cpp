@@ -10,7 +10,10 @@
 
 namespace {
 constexpr uint64_t FAN_CONFIG_CACHE_TTL_MS = 500;
-}
+// The xe kernel driver computes fan RPM from the tachometer pulses since the previous read, so
+// reads closer together than this see too few pulses and report 0. Reuse the last reading instead.
+constexpr uint64_t FAN_RPM_CACHE_TTL_MS = 100;
+} // namespace
 
 /**
  * @brief Releases cached fan handles and resets fan count.
@@ -40,6 +43,14 @@ void fan::clearFanHandles()
 	if (fanConfigCachedAtMs != nullptr) {
 		delete[] fanConfigCachedAtMs;
 		fanConfigCachedAtMs = nullptr;
+	}
+	if (fanRpmCache != nullptr) {
+		delete[] fanRpmCache;
+		fanRpmCache = nullptr;
+	}
+	if (fanRpmCachedAtMs != nullptr) {
+		delete[] fanRpmCachedAtMs;
+		fanRpmCachedAtMs = nullptr;
 	}
 	fanCount = 0;
 }
@@ -85,6 +96,40 @@ ze_result_t fan::getConfigById(uint32_t fanId, zes_fan_config_t &config)
 	fanConfigCached[fanId] = true;
 	fanConfigCachedAtMs[fanId] = nowMs;
 	config = liveConfig;
+	return ZE_RESULT_SUCCESS;
+}
+
+/**
+ * @brief Reads a fan's speed in RPM, reusing a reading taken within FAN_RPM_CACHE_TTL_MS.
+ *
+ * @param[in] fanId Fan index.
+ * @param[out] rpm Fan speed in RPM.
+ * @return ze_result_t ZE_RESULT_SUCCESS on success.
+ */
+ze_result_t fan::getRpmById(uint32_t fanId, int32_t &rpm)
+{
+	if (fanHandles == nullptr || fanRpmCache == nullptr || fanRpmCachedAtMs == nullptr || fanId >= fanCount) {
+		return ZE_RESULT_ERROR_INVALID_ARGUMENT;
+	}
+
+	const uint64_t nowMs = getMonotonicMs();
+	if (fanRpmCachedAtMs[fanId] != 0 && nowMs - fanRpmCachedAtMs[fanId] <= FAN_RPM_CACHE_TTL_MS) {
+		rpm = fanRpmCache[fanId];
+		return ZE_RESULT_SUCCESS;
+	}
+
+	int32_t liveRpm = -1;
+	ze_result_t result = zesFanGetState(fanHandles[fanId], ZES_FAN_SPEED_UNITS_RPM, &liveRpm);
+	if (result != ZE_RESULT_SUCCESS) {
+		return result;
+	}
+	if (liveRpm < 0) {
+		return ZE_RESULT_ERROR_NOT_AVAILABLE;
+	}
+
+	fanRpmCache[fanId] = liveRpm;
+	fanRpmCachedAtMs[fanId] = nowMs;
+	rpm = liveRpm;
 	return ZE_RESULT_SUCCESS;
 }
 
@@ -212,6 +257,8 @@ ze_result_t fan::enumFans(zes_device_handle_t device)
 	fanConfigCache = new zes_fan_config_t[fanCount]();
 	fanConfigCached = new bool[fanCount]();
 	fanConfigCachedAtMs = new uint64_t[fanCount]();
+	fanRpmCache = new int32_t[fanCount]();
+	fanRpmCachedAtMs = new uint64_t[fanCount]();
 
 	return ZE_RESULT_SUCCESS;
 }
@@ -333,15 +380,24 @@ ze_result_t fan::zesRun(zes_device_handle_t device)
 }
 
 /**
- * @brief Reads fan speed percent for one fan ID.
+ * @brief Reads the speed of one fan, as a percentage when one can be derived and in RPM otherwise.
  *
- * Falls back to RPM->percent conversion when direct percent state is unavailable.
+ * The RPM state is read first, before any other fan query. On xe the kernel derives fan1_input
+ * from the tachometer pulses counted since the previous read, so a second read within a few
+ * milliseconds sees no pulses and reports 0 RPM (or fails with -EAGAIN). Sysman's config and
+ * percent queries read the same counter, so issuing them first leaves the RPM read nothing to
+ * measure.
+ *
+ * Percent is preferred: a configured fixed or flat-table setpoint (so config changes are
+ * immediately visible in stats output), then the percent state, then the RPM scaled by the
+ * fan's maximum. When the fan reports no maximum, the RPM is returned as is.
  *
  * @param[in] fanId Fan index.
- * @param[out] pct Fan speed percentage.
+ * @param[out] speed Fan speed, in @p units.
+ * @param[out] units ZES_FAN_SPEED_UNITS_PERCENT or ZES_FAN_SPEED_UNITS_RPM.
  * @return ze_result_t ZE_RESULT_SUCCESS on success.
  */
-ze_result_t fan::getSpeedPercentById(uint32_t fanId, int32_t &pct)
+ze_result_t fan::getSpeedById(uint32_t fanId, int32_t &speed, zes_fan_speed_units_t &units)
 {
 	ze_result_t result = ensureFansEnumerated();
 	if (result != ZE_RESULT_SUCCESS) {
@@ -351,24 +407,27 @@ ze_result_t fan::getSpeedPercentById(uint32_t fanId, int32_t &pct)
 		return ZE_RESULT_ERROR_INVALID_ARGUMENT;
 	}
 
-	// If a fixed target is configured, prefer reporting the configured setpoint
-	// so config changes are immediately visible in stats output.
+	int32_t speedRpm = -1;
+	const bool rpmValid = getRpmById(fanId, speedRpm) == ZE_RESULT_SUCCESS;
+
+	zes_fan_properties_t props = {};
+	const int32_t maxRpm = getPropertiesById(fanId, props) == ZE_RESULT_SUCCESS ? props.maxRPM : -1;
+	auto rpmToPct = [maxRpm](int32_t rpm) {
+		const int32_t speedPct = static_cast<int32_t>((static_cast<int64_t>(rpm) * 100) / maxRpm);
+		return std::clamp(speedPct, 0, 100);
+	};
+
+	units = ZES_FAN_SPEED_UNITS_PERCENT;
 	zes_fan_config_t cfg = {};
-	result = getConfigById(fanId, cfg);
-	if (result == ZE_RESULT_SUCCESS) {
+	if (getConfigById(fanId, cfg) == ZE_RESULT_SUCCESS) {
 		if (cfg.mode == ZES_FAN_SPEED_MODE_FIXED) {
 			if (cfg.speedFixed.units == ZES_FAN_SPEED_UNITS_PERCENT) {
-				pct = cfg.speedFixed.speed;
+				speed = cfg.speedFixed.speed;
 				return ZE_RESULT_SUCCESS;
 			}
-			if (cfg.speedFixed.units == ZES_FAN_SPEED_UNITS_RPM) {
-				zes_fan_properties_t props = {};
-				if (getPropertiesById(fanId, props) == ZE_RESULT_SUCCESS && props.maxRPM > 0) {
-					int32_t speedPct =
-						static_cast<int32_t>((static_cast<int64_t>(cfg.speedFixed.speed) * 100) / props.maxRPM);
-					pct = std::clamp(speedPct, 0, 100);
-					return ZE_RESULT_SUCCESS;
-				}
+			if (cfg.speedFixed.units == ZES_FAN_SPEED_UNITS_RPM && maxRpm > 0) {
+				speed = rpmToPct(cfg.speedFixed.speed);
+				return ZE_RESULT_SUCCESS;
 			}
 		}
 
@@ -386,58 +445,69 @@ ze_result_t fan::getSpeedPercentById(uint32_t fanId, int32_t &pct)
 			}
 			if (flatTable) {
 				if (firstUnits == ZES_FAN_SPEED_UNITS_PERCENT) {
-					pct = firstSpeed;
+					speed = firstSpeed;
 					return ZE_RESULT_SUCCESS;
 				}
-				if (firstUnits == ZES_FAN_SPEED_UNITS_RPM) {
-					zes_fan_properties_t props = {};
-					if (getPropertiesById(fanId, props) == ZE_RESULT_SUCCESS && props.maxRPM > 0) {
-						int32_t speedPct =
-							static_cast<int32_t>((static_cast<int64_t>(firstSpeed) * 100) / props.maxRPM);
-						pct = std::clamp(speedPct, 0, 100);
-						return ZE_RESULT_SUCCESS;
-					}
+				if (firstUnits == ZES_FAN_SPEED_UNITS_RPM && maxRpm > 0) {
+					speed = rpmToPct(firstSpeed);
+					return ZE_RESULT_SUCCESS;
 				}
 			}
 		}
 	}
 
-	int32_t speed = 0;
-	result = zesFanGetState(fanHandles[fanId], ZES_FAN_SPEED_UNITS_PERCENT, &speed);
-	if (result == ZE_RESULT_SUCCESS && speed >= 0) {
-		pct = speed;
+	int32_t speedPct = 0;
+	result = zesFanGetState(fanHandles[fanId], ZES_FAN_SPEED_UNITS_PERCENT, &speedPct);
+	if (result == ZE_RESULT_SUCCESS && speedPct >= 0) {
+		speed = speedPct;
 		return ZE_RESULT_SUCCESS;
 	}
 
-	int32_t speedRpm = 0;
-	result = zesFanGetState(fanHandles[fanId], ZES_FAN_SPEED_UNITS_RPM, &speedRpm);
-	if (result != ZE_RESULT_SUCCESS || speedRpm < 0) {
+	if (!rpmValid) {
 		return ZE_RESULT_ERROR_NOT_AVAILABLE;
 	}
-
-	zes_fan_properties_t props = {};
-	result = getPropertiesById(fanId, props);
-	if (result != ZE_RESULT_SUCCESS || props.maxRPM == 0) {
-		return ZE_RESULT_ERROR_NOT_AVAILABLE;
+	if (maxRpm > 0) {
+		speed = rpmToPct(speedRpm);
+		return ZE_RESULT_SUCCESS;
 	}
-
-	int32_t speedPct = static_cast<int32_t>((static_cast<int64_t>(speedRpm) * 100) / props.maxRPM);
-	if (speedPct < 0) {
-		speedPct = 0;
-	} else if (speedPct > 100) {
-		speedPct = 100;
-	}
-	pct = speedPct;
+	speed = speedRpm;
+	units = ZES_FAN_SPEED_UNITS_RPM;
 	return ZE_RESULT_SUCCESS;
 }
 
 /**
- * @brief Reads average fan speed percentage across all fans.
+ * @brief Reads fan speed percent for one fan ID.
  *
- * @param[out] pct Average fan speed percent.
+ * @param[in] fanId Fan index.
+ * @param[out] pct Fan speed percentage.
+ * @return ze_result_t ZE_RESULT_SUCCESS on success; ZE_RESULT_ERROR_NOT_AVAILABLE when the fan
+ *         only reports RPM (see getSpeedById()).
+ */
+ze_result_t fan::getSpeedPercentById(uint32_t fanId, int32_t &pct)
+{
+	int32_t speed = 0;
+	zes_fan_speed_units_t units = ZES_FAN_SPEED_UNITS_PERCENT;
+	ze_result_t result = getSpeedById(fanId, speed, units);
+	if (result != ZE_RESULT_SUCCESS) {
+		return result;
+	}
+	if (units != ZES_FAN_SPEED_UNITS_PERCENT) {
+		return ZE_RESULT_ERROR_NOT_AVAILABLE;
+	}
+	pct = speed;
+	return ZE_RESULT_SUCCESS;
+}
+
+/**
+ * @brief Reads average fan speed across all fans.
+ *
+ * Averages the fans that report a percentage; when none does, averages the fans that report RPM.
+ *
+ * @param[out] speed Average fan speed, in @p units.
+ * @param[out] units ZES_FAN_SPEED_UNITS_PERCENT or ZES_FAN_SPEED_UNITS_RPM.
  * @return ze_result_t ZE_RESULT_SUCCESS on success.
  */
-ze_result_t fan::getSpeedPercent(int32_t &pct)
+ze_result_t fan::getSpeed(int32_t &speed, zes_fan_speed_units_t &units)
 {
 	ze_result_t result = ensureFansEnumerated();
 	if (result != ZE_RESULT_SUCCESS) {
@@ -448,19 +518,84 @@ ze_result_t fan::getSpeedPercent(int32_t &pct)
 	}
 
 	int64_t totalPct = 0;
+	uint32_t pctCount = 0;
+	int64_t totalRpm = 0;
+	uint32_t rpmCount = 0;
+	for (uint32_t i = 0; i < fanCount; ++i) {
+		int32_t fanSpeed = 0;
+		zes_fan_speed_units_t fanUnits = ZES_FAN_SPEED_UNITS_PERCENT;
+		if (getSpeedById(i, fanSpeed, fanUnits) != ZE_RESULT_SUCCESS || fanSpeed < 0) {
+			continue;
+		}
+		if (fanUnits == ZES_FAN_SPEED_UNITS_PERCENT) {
+			totalPct += fanSpeed;
+			++pctCount;
+		} else {
+			totalRpm += fanSpeed;
+			++rpmCount;
+		}
+	}
+	if (pctCount > 0) {
+		speed = static_cast<int32_t>(totalPct / static_cast<int64_t>(pctCount));
+		units = ZES_FAN_SPEED_UNITS_PERCENT;
+		return ZE_RESULT_SUCCESS;
+	}
+	if (rpmCount > 0) {
+		speed = static_cast<int32_t>(totalRpm / static_cast<int64_t>(rpmCount));
+		units = ZES_FAN_SPEED_UNITS_RPM;
+		return ZE_RESULT_SUCCESS;
+	}
+	return ZE_RESULT_ERROR_NOT_AVAILABLE;
+}
+
+/**
+ * @brief Reads average fan speed in RPM across all fans.
+ *
+ * @param[out] rpm Average fan speed in RPM.
+ * @return ze_result_t ZE_RESULT_SUCCESS on success.
+ */
+ze_result_t fan::getSpeedRpm(int32_t &rpm)
+{
+	ze_result_t result = ensureFansEnumerated();
+	if (result != ZE_RESULT_SUCCESS) {
+		return result;
+	}
+
+	int64_t totalRpm = 0;
 	uint32_t validCount = 0;
 	for (uint32_t i = 0; i < fanCount; ++i) {
-		int32_t speedPct = 0;
-		ze_result_t res = getSpeedPercentById(i, speedPct);
-		if (res == ZE_RESULT_SUCCESS && speedPct >= 0) {
-			totalPct += speedPct;
+		int32_t fanRpm = 0;
+		if (getRpmById(i, fanRpm) == ZE_RESULT_SUCCESS) {
+			totalRpm += fanRpm;
 			++validCount;
 		}
 	}
 	if (validCount == 0) {
 		return ZE_RESULT_ERROR_NOT_AVAILABLE;
 	}
-	pct = static_cast<int32_t>(totalPct / static_cast<int64_t>(validCount));
+	rpm = static_cast<int32_t>(totalRpm / static_cast<int64_t>(validCount));
+	return ZE_RESULT_SUCCESS;
+}
+
+/**
+ * @brief Reads average fan speed percentage across all fans.
+ *
+ * @param[out] pct Average fan speed percent.
+ * @return ze_result_t ZE_RESULT_SUCCESS on success; ZE_RESULT_ERROR_NOT_AVAILABLE when the fans
+ *         only report RPM (see getSpeed()).
+ */
+ze_result_t fan::getSpeedPercent(int32_t &pct)
+{
+	int32_t speed = 0;
+	zes_fan_speed_units_t units = ZES_FAN_SPEED_UNITS_PERCENT;
+	ze_result_t result = getSpeed(speed, units);
+	if (result != ZE_RESULT_SUCCESS) {
+		return result;
+	}
+	if (units != ZES_FAN_SPEED_UNITS_PERCENT) {
+		return ZE_RESULT_ERROR_NOT_AVAILABLE;
+	}
+	pct = speed;
 	return ZE_RESULT_SUCCESS;
 }
 

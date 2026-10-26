@@ -7,6 +7,8 @@
 #include "temperature.h"
 #include "temperature_ext.h"
 #include "debug.h"
+#include "drm_hwmon.h"
+#include <algorithm>
 #include <cmath>
 #include <map>
 #include <memory>
@@ -336,6 +338,83 @@ ze_result_t temperature::getState(zes_temp_handle_t temperatureHandle, double *t
 }
 
 /**
+ * @brief Reads a sensor, falling back to the driver's hwmon channels when sysman lacks privilege
+ *
+ * Sysman reads some platforms' temperatures from PMT telemetry, which only root may read, while
+ * the DRM driver publishes the same sensors through hwmon to every user. Only device-level sensors
+ * fall back: hwmon has no per-tile channels.
+ *
+ * @param temperatureHandle Handle to the specific temperature sensor
+ * @param properties Properties of that sensor, as returned by getProperties()
+ * @param temp Pointer to store the current temperature value in Celsius
+ * @return ze_result_t ZE_RESULT_SUCCESS if either source produced a reading, the sysman error otherwise
+ */
+ze_result_t temperature::readState(zes_temp_handle_t temperatureHandle, const zes_temp_properties_t &properties,
+								   double *temp)
+{
+	ze_result_t result = getState(temperatureHandle, temp);
+	if (result == ZE_RESULT_ERROR_INSUFFICIENT_PERMISSIONS && !properties.onSubdevice &&
+		getHwmonTemp(properties.type, temp)) {
+		DBG("  Current Temperature (hwmon): {:f} C\n", *temp);
+		return ZE_RESULT_SUCCESS;
+	}
+	return result;
+}
+
+/**
+ * @brief Reads the hwmon equivalent of a sysman temperature sensor type
+ *
+ * GPU maps to the "pkg" channel and memory to the hottest "vram*" channel, matching the sysman
+ * definitions (maximum across the GPU's / local memory's sensors). Other types have no hwmon
+ * equivalent.
+ *
+ * @param type The sysman sensor type to read
+ * @param temp Pointer to store the temperature value in Celsius
+ * @return true if a reading was taken
+ */
+bool temperature::getHwmonTemp(zes_temp_sensors_t type, double *temp) const
+{
+	if (hwmonDir.empty()) {
+		return false;
+	}
+	constexpr double millidegreesPerDegree = 1000.0;
+	if (type == ZES_TEMP_SENSORS_GPU) {
+		const auto milliC = drm_hwmon::readLabeled(hwmonDir, "temp", "pkg");
+		if (!milliC) {
+			return false;
+		}
+		*temp = static_cast<double>(*milliC) / millidegreesPerDegree;
+		return true;
+	}
+	if (type == ZES_TEMP_SENSORS_MEMORY) {
+		bool found = false;
+		int64_t hottest = 0;
+		for (const auto &[label, milliC] : drm_hwmon::readAllLabeled(hwmonDir, "temp")) {
+			if (label.starts_with("vram")) {
+				hottest = found ? std::max(hottest, milliC) : milliC;
+				found = true;
+			}
+		}
+		if (found) {
+			*temp = static_cast<double>(hottest) / millidegreesPerDegree;
+		}
+		return found;
+	}
+	return false;
+}
+
+/**
+ * @brief Records the device's PCI address so readings can fall back to its hwmon channels
+ *
+ * @param bdf PCI BDF address of the device, in canonical DDDD:BB:DD.F form
+ */
+void temperature::setPciBdf(const std::string &bdf)
+{
+	const auto dir = drm_hwmon::findDir(bdf);
+	hwmonDir = dir ? dir->string() : std::string();
+}
+
+/**
  * @brief Gets temperature for a specific sensor type
  *
  * This function searches for temperature sensors matching the specified type
@@ -368,7 +447,7 @@ ze_result_t temperature::getTemp(zes_temp_sensors_t type, double *temp)
 
 		if (properties.type == type) {
 			sensorFound = true;
-			result = getState(temperatureHandles[i], temp);
+			result = readState(temperatureHandles[i], properties, temp);
 			if (result == ZE_RESULT_SUCCESS) {
 				return result;
 			} else {
@@ -415,7 +494,7 @@ ze_result_t temperature::getTempPerTile(zes_temp_sensors_t type, std::map<uint32
 		}
 
 		double temp = 0.0;
-		result = getState(temperatureHandles[i], &temp);
+		result = readState(temperatureHandles[i], properties, &temp);
 		if (result != ZE_RESULT_SUCCESS) {
 			DBG("Failed to get state for temperature sensor {}: 0x{:X} ({})\n", i, result, l0_error_to_string(result));
 			continue;

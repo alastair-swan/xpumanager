@@ -989,6 +989,11 @@ ze_result_t device::smDevInit(zes_driver_handle_t zesDri, zes_device_handle_t ze
 	// support (older drivers crash when handed the unknown extension pNext).
 	memoryInstance.setZesDriver(zesDriver);
 
+	// Pass the BDF to the temperature and power classes so readings sysman refuses for lack of
+	// privilege can come from the driver's hwmon channels instead.
+	temperatureInstance.setPciBdf(pciInstance.getBDFStr());
+	powerInstance.setPciBdf(pciInstance.getBDFStr());
+
 	// Initialize page offline module with sysman device context
 	result = pageOfflineInstance.init(zesDri, zesDev);
 	if (result != ZE_RESULT_SUCCESS) {

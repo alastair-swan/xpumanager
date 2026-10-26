@@ -15,6 +15,7 @@
 #include <fstream>
 #include <memory>
 #include <functional>
+#include <string>
 
 #define CORE_THROTTLE_THRESHOLD_DEFAULT 105
 #define CORE_SHUTDOWN_THRESHOLD_DEFAULT 130
@@ -69,6 +70,12 @@ private:
 	// memory-temperature getters to convert MR4 -> max-of-range Celsius.
 	bool hasLpddr5Memory;
 
+	// hwmon directory of the device's DRM driver, or empty when it has none. Read when
+	// sysman refuses a temperature for lack of privilege (its PMT source is root-only).
+	std::string hwmonDir;
+
+	ze_result_t readState(zes_temp_handle_t temperatureHandle, const zes_temp_properties_t &properties, double *temp);
+	bool getHwmonTemp(zes_temp_sensors_t type, double *temp) const;
 	void loadTemperatureThresholds();
 	void loadThresholdSection(const nlohmann::json &thresholdsJson, const std::string &key,
 							  std::function<void(uint32_t, uint64_t)> setter);
@@ -91,6 +98,7 @@ public:
 
 	ze_result_t init(zes_device_handle_t device) override;
 	ze_result_t zesRun(zes_device_handle_t device) override;
+	void setPciBdf(const std::string &bdf);
 	uint64_t getThrottleCoreTemperature(uint32_t pciDeviceId);
 	uint64_t getShutdownCoreTemperature(uint32_t pciDeviceId);
 	uint64_t getShutdownMemoryTemperature(uint32_t pciDeviceId);

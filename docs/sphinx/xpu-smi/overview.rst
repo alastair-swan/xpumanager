@@ -425,6 +425,9 @@ Multi-char combos expand character-by-character (e.g. ``pu`` = POWER + TEMPERATU
    * - ``fan.speed``
      - %
      - Fan speed percentage
+   * - ``fan.speed.rpm``
+     - RPM
+     - Fan speed in RPM
 
 The ``ecc.errors.*`` and ``ras.*`` error counters read the same RAS categories as ``stats -r``;
 the ``ecc.errors.*`` totals add up every hardware category, i.e. all but resets, programming and

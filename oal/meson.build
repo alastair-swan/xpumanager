@@ -10,6 +10,7 @@ oal_deps = [thread_dep, levelzero_dep, bdf_dep, igsc_dep, compat_dep]
 if is_windows
   oal_sources = files(
     'win/dllmain.cpp',
+    'win/drm_hwmon.cpp',
     'win/dynload.cpp',
     'win/fs_lock.cpp',
     'win/http_client.cpp',
@@ -29,6 +30,7 @@ elif is_linux
     'lin/dynload.cpp',
     'lin/crashlog_lin_exec.cpp',
     'lin/dbg_log.cpp',
+    'lin/drm_hwmon.cpp',
     'lin/dmi_reader.cpp',
     'lin/fs_lock.cpp',
     'lin/http_client.cpp',

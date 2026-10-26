@@ -6,6 +6,8 @@
 
 #include "power.h"
 #include "device.h"
+#include "drm_hwmon.h"
+#include <chrono>
 #include <map>
 #include <memory>
 
@@ -292,6 +294,58 @@ ze_result_t power::getEnergyCounter(zes_pwr_handle_t powerHandle, zes_power_ener
 }
 
 /**
+ * @brief Reads a device-level energy counter, falling back to hwmon when sysman lacks privilege
+ *
+ * Sysman reads some platforms' energy counters from PMT telemetry, which only root may read, while
+ * the DRM driver publishes card and package energy through hwmon to every user. hwmon counts in
+ * microjoules like sysman but carries no timestamp, so the reading is stamped with the monotonic
+ * clock; callers only ever difference two readings of the same domain.
+ *
+ * @param powerHandle Handle to the specific power domain
+ * @param domain The domain that handle reports in zes_power_ext_properties_t::domain
+ * @param energyCounter Pointer to structure to store energy counter data
+ * @return ze_result_t ZE_RESULT_SUCCESS if either source produced a reading, the sysman error otherwise
+ */
+ze_result_t power::readEnergyCounter(zes_pwr_handle_t powerHandle, zes_power_domain_t domain,
+									 zes_power_energy_counter_t *energyCounter)
+{
+	ze_result_t result = getEnergyCounter(powerHandle, energyCounter);
+	if (result != ZE_RESULT_ERROR_INSUFFICIENT_PERMISSIONS || hwmonDir.empty()) {
+		return result;
+	}
+
+	const char *label = nullptr;
+	if (domain == ZES_POWER_DOMAIN_CARD) {
+		label = "card";
+	} else if (domain == ZES_POWER_DOMAIN_PACKAGE) {
+		label = "pkg";
+	} else {
+		return result;
+	}
+	const auto microjoules = drm_hwmon::readLabeled(hwmonDir, "energy", label);
+	if (!microjoules || *microjoules < 0) {
+		return result;
+	}
+	const auto now = std::chrono::steady_clock::now().time_since_epoch();
+	energyCounter->energy = static_cast<uint64_t>(*microjoules);
+	energyCounter->timestamp =
+		static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+	DBG("  Energy (hwmon {}): {} µJ at {} us\n", label, energyCounter->energy, energyCounter->timestamp);
+	return ZE_RESULT_SUCCESS;
+}
+
+/**
+ * @brief Records the device's PCI address so energy reads can fall back to its hwmon channels
+ *
+ * @param bdf PCI BDF address of the device, in canonical DDDD:BB:DD.F form
+ */
+void power::setPciBdf(const std::string &bdf)
+{
+	const auto dir = drm_hwmon::findDir(bdf);
+	hwmonDir = dir ? dir->string() : std::string();
+}
+
+/**
  * @brief Gets the current power limits for a power domain
  *
  * This function retrieves the current power limit configuration for the
@@ -434,7 +488,7 @@ ze_result_t power::getEnergy(uint64_t *pwr, uint64_t *timeStamp, bool forGPU)
 		}
 
 		// Once we found the right domain, we can get the energy counter
-		result = getEnergyCounter(powerHandles[i], &energyCounter);
+		result = readEnergyCounter(powerHandles[i], extProps.domain, &energyCounter);
 		if (result != ZE_RESULT_SUCCESS) {
 			DBG("Failed to get energy counter for power domain {}. 0x{:X} ({})\n", i, result,
 				l0_error_to_string(result));
@@ -554,7 +608,7 @@ ze_result_t power::getEnergyPerTile(std::map<uint32_t, std::pair<uint64_t, uint6
 		if (extProps.domain == ZES_POWER_DOMAIN_CARD || extProps.domain == ZES_POWER_DOMAIN_PACKAGE ||
 			extProps.domain == ZES_POWER_DOMAIN_GPU) {
 			zes_power_energy_counter_t energyCounter = {};
-			result = getEnergyCounter(powerHandles[i], &energyCounter);
+			result = readEnergyCounter(powerHandles[i], extProps.domain, &energyCounter);
 			if (result != ZE_RESULT_SUCCESS) {
 				DBG("Failed to get energy counter for power domain {}: 0x{:X} ({})\n", i, result,
 					l0_error_to_string(result));

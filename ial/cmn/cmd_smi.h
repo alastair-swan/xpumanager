@@ -47,7 +47,8 @@ struct SmiDeviceStats
 	bool eccEnabled = false;
 
 	// Fan
-	int32_t fanSpeedPct = -1;
+	int32_t fanSpeed = -1;
+	zes_fan_speed_units_t fanSpeedUnits = ZES_FAN_SPEED_UNITS_PERCENT;
 	bool fanValid = false;
 
 	// Temperature

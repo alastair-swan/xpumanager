@@ -2,7 +2,7 @@
  * Copyright (C) 2026 Intel Corporation
  * SPDX-License-Identifier: MIT
  *
- * Fan metrics: speed as a percentage of maximum.
+ * Fan metrics: speed as a percentage of maximum, and in RPM.
  */
 
 #include "fan.h"
@@ -38,7 +38,26 @@ constexpr auto speed = QueryMetric{// NOLINT(readability-identifier-naming)
 									   return r;
 								   }};
 
-constexpr auto ALL = std::to_array<QueryMetric>({speed});
+constexpr auto speedRpm = QueryMetric{// NOLINT(readability-identifier-naming)
+									  .name = "fan.speed.rpm",
+									  .unit = "RPM",
+									  .description = "Fan speed in RPM (averaged across all fans)",
+									  .source = MetricSource::Live,
+									  .groups = MetricGroup::FAN,
+									  .getter = [](devInfo &d, MetricValue &out, const MetricCache &) -> ze_result_t {
+										  auto *f = d.dev->getFan();
+										  if (f == nullptr) {
+											  return ZE_RESULT_ERROR_UNSUPPORTED_FEATURE;
+										  }
+										  int32_t rpm = 0;
+										  auto const r = f->getSpeedRpm(rpm);
+										  if (r == ZE_RESULT_SUCCESS) {
+											  out = std::to_string(rpm);
+										  }
+										  return r;
+									  }};
+
+constexpr auto ALL = std::to_array<QueryMetric>({speed, speedRpm});
 
 } // namespace
 

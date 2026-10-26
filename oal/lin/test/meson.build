@@ -83,6 +83,19 @@ if get_option('with_tests')
 
   test('pci_sysfs_test', pci_sysfs_test)
 
+  # DRM hwmon channel reads against a fake sysfs tree. Compiles drm_hwmon.cpp
+  # directly so the test needs no OAL link.
+  drm_hwmon_test = executable(
+    'drm_hwmon_test',
+    ['drm_hwmon_test.cpp', '../drm_hwmon.cpp'],
+    include_directories: [global_inc, include_directories('..')],
+    dependencies: [doctest_dep, bdf_dep],
+    link_args: is_linux ? ['-pie'] : [],
+    build_by_default: true,
+  )
+
+  test('drm_hwmon_test', drm_hwmon_test)
+
   # VRAM manager debugfs path resolution tests. Compiles vram_debugfs.cpp
   # directly so the test needs no OAL link.
   vram_debugfs_test = executable(

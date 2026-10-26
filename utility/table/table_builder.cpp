@@ -400,14 +400,20 @@ std::string TableBuilder::toTableString() const
 			alignTextDirect(result, "", rowNumWidth, Align::Left);
 			result += xpum::compat::format(" {}", config.verticalChar);
 		}
-		for (const auto &col : columns) {
+		for (size_t colIdx = 0; colIdx < columns.size(); ++colIdx) {
+			const auto &col = columns[colIdx];
 			result += ' ';
 			if (lineIdx < col.extraHeaders.size()) {
 				alignTextDirect(result, col.extraHeaders[lineIdx], col.width, col.alignment);
 			} else {
 				alignTextDirect(result, "", col.width, col.alignment);
 			}
-			result += xpum::compat::format(" {}", config.verticalChar);
+			const bool isLast = (colIdx == columns.size() - 1);
+			if (!suppressHeaderColSep || isLast) {
+				result += xpum::compat::format(" {}", config.verticalChar);
+			} else {
+				result += "  "; // two spaces instead of " |"
+			}
 		}
 		result += '\n';
 	}

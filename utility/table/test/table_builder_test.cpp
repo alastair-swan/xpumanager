@@ -602,6 +602,16 @@ TEST_CASE("TableBuilder suppressHeaderColumnSeparators reduces pipes on header l
                   "suppressed 3-col header should have only outer 2 pipes");
 }
 
+TEST_CASE("TableBuilder suppressHeaderColumnSeparators also applies to extra header lines") {
+    auto suppressed = TableBuilder::bordered();
+    suppressed.addColumn("Alpha").addColumn("Beta").addColumn("Gamma")
+        .setColumnExtraHeaders(2, {"Delta"})
+        .addRow("1", "2", "3").suppressHeaderColumnSeparators().enableAutoSizing();
+
+    CHECK_MESSAGE(pipeCountOnLine(suppressed.toString(), "Delta") == 2,
+                  "suppressed 3-col extra header line should have only outer 2 pipes");
+}
+
 TEST_CASE("TableBuilder suppressDataColumnSeparators reduces pipes on data line") {
     auto normal = TableBuilder::bordered();
     normal.addColumn("A").addColumn("B").addColumn("C").addRow("foo", "bar", "baz").enableAutoSizing();

@@ -377,36 +377,112 @@ void cmdSmi::computeFromBaseline(SmiDeviceStats &stats, const SmiBaseline &basel
 // ── Table rendering ──────────────────────────────────────────────────────────
 
 /**
+ * @brief Split a device name into lines of at most @p width characters, breaking at spaces.
+ *
+ * Words longer than @p width are hard-broken.
+ *
+ * @param[in] name  Device name.
+ * @param[in] width Maximum line width.
+ * @return The lines, at least one.
+ */
+static std::vector<std::string> wrapName(const std::string &name, size_t width)
+{
+	std::vector<std::string> lines;
+	std::string line;
+	size_t pos = 0;
+	while (pos < name.size()) {
+		size_t end = name.find(' ', pos);
+		if (end == std::string::npos) {
+			end = name.size();
+		}
+		std::string word = name.substr(pos, end - pos);
+		pos = end + 1;
+		while (word.size() > width) {
+			if (!line.empty()) {
+				lines.push_back(line);
+				line.clear();
+			}
+			lines.push_back(word.substr(0, width));
+			word.erase(0, width);
+		}
+		if (word.empty()) {
+			continue;
+		}
+		if (line.empty()) {
+			line = word;
+		} else if (line.size() + 1 + word.size() <= width) {
+			line += ' ';
+			line += word;
+		} else {
+			lines.push_back(line);
+			line = word;
+		}
+	}
+	if (!line.empty() || lines.empty()) {
+		lines.push_back(line);
+	}
+	return lines;
+}
+
+// Column content widths of the summary tables. They match nvidia-smi's, so the two tools'
+// output lines up at 91 columns: each cell renders as " <content> |".
+constexpr int GPU_COL0_WIDTH = 39; // GPU  Name  Persistence-M  /  Fan  Temp  Pwr:Usage/Cap
+constexpr int GPU_COL1_WIDTH = 22; // Bus-Id  Disp.A  /  Memory-Usage
+constexpr int GPU_COL2_WIDTH = 20; // Volatile Uncorr. ECC  /  GPU-Util  Compute M.
+// The process table's columns share the same 87-character content area: 3 + 7 + 4 + 51 + 10
+// plus " | " between each pair.
+constexpr int PROC_GPU_WIDTH = 3;
+constexpr int PROC_PID_WIDTH = 7;
+constexpr int PROC_TYPE_WIDTH = 4;
+constexpr int PROC_NAME_WIDTH = 51;
+constexpr int PROC_MEM_WIDTH = 10;
+
+/**
  * @brief Build and return the GPU summary table.
  *
- * Three-column layout with multi-line column headers (via setColumnExtraHeaders):
+ * Three fixed-width columns with multi-line column headers (via setColumnExtraHeaders),
+ * matching the nvidia-smi layout:
  *   Col 1: GPU#  Name  Persistence-M  /  Fan  Temp  Pwr:Usage/Cap
  *   Col 2: Bus-Id  Disp.A  /  Memory-Usage
  *   Col 3: Volatile Uncorr. ECC  /  GPU-Util  Compute M.
+ * Every cell is pre-formatted to its column's full width, so the strings below fix the layout.
  */
 TableBuilder cmdSmi::buildGpuTable(const std::vector<SmiDeviceStats> &devStats, const std::string &lzVersion)
 {
-	// Keep fan/temp columns aligned for strings like "100% (20000RPM)" and "N/A".
-	constexpr int fanDisplayWidth = static_cast<int>(sizeof("100% (20000RPM)") - 1);
-	constexpr int tempDisplayWidth = 4;
+	// Col 1 line 1: "{:>3}  " index, then the name, then "Persistence-M" right-aligned.
+	constexpr int persistenceWidth = static_cast<int>(sizeof("Persistence-M") - 1);
+	constexpr int nameHeaderWidth = GPU_COL0_WIDTH - 5 - persistenceWidth;
+	// The persistence value only needs " Off", leaving the name more room than its header.
+	constexpr size_t nameWidth = GPU_COL0_WIDTH - 5 - 4;
+	// Col 1 line 2: fan wide enough for "20000RPM", temperature for "100C", power right-aligned.
+	constexpr int fanWidth = 8;
+	constexpr int tempWidth = 4;
+	constexpr int pwrWidth = GPU_COL0_WIDTH - fanWidth - 1 - tempWidth;
+	// Col 2 line 1: "Disp.A" right-aligned after the bus id.
+	constexpr int dispWidth = static_cast<int>(sizeof("Disp.A") - 1);
+	// Col 3 line 2: "GPU-Util" and "Compute M." each right-aligned.
+	constexpr int utilWidth = static_cast<int>(sizeof("GPU-Util") - 1);
+	constexpr int computeWidth = GPU_COL2_WIDTH - utilWidth - 2;
 
 	TableBuilder table = TableBuilder::bordered();
-	// Header text spacing mirrors the data format strings:
-	//   col1 line1: "{:>3}  {:<22}  Off" → "Persistence-M" must start at offset 3+2+22+2=29
-	//   col2 line1: "{:<16}  Off"         → "Disp.A"         must start at offset 16+2=18
-	table.addColumn("GPU  Name                    Persistence-M", Align::Left)
-		.addColumn("Bus-Id            Disp.A", Align::Left)
-		.addColumn("Volatile Uncorr. ECC", Align::Right);
+	table.disableAutoSizing();
+	table
+		.addColumn(xpum::compat::format("GPU  {:<{}}{}", "Name", nameHeaderWidth, "Persistence-M"), GPU_COL0_WIDTH,
+				   Align::Left)
+		.addColumn(xpum::compat::format("{:<{}}{}", "Bus-Id", GPU_COL1_WIDTH - dispWidth, "Disp.A"), GPU_COL1_WIDTH,
+				   Align::Left)
+		.addColumn("Volatile Uncorr. ECC", GPU_COL2_WIDTH, Align::Right);
 
 	// Multi-line column headers (second header line per column)
-	table.setColumnExtraHeaders(0, {xpum::compat::format("{:<{}}  {:>{}}  {}", "Fan", fanDisplayWidth, "Temp",
-														 tempDisplayWidth, "Pwr:Usage/Cap")});
-	table.setColumnExtraHeaders(1, {"Memory-Usage"});
-	table.setColumnExtraHeaders(2, {"GPU-Util  Compute M."});
+	table.setColumnExtraHeaders(0, {xpum::compat::format("{:<{}} {:>{}}{:>{}}", "Fan", fanWidth, "Temp", tempWidth,
+														 "Pwr:Usage/Cap", pwrWidth)});
+	table.setColumnExtraHeaders(1, {xpum::compat::format("{:>{}}", "Memory-Usage", GPU_COL1_WIDTH)});
+	table.setColumnExtraHeaders(
+		2, {xpum::compat::format("{:>{}}  {:>{}}", "GPU-Util", utilWidth, "Compute M.", computeWidth)});
 
-	// Banner rows: inside the table border, above column headers. The four versions are
-	// split over two lines because one line of them is wider than the columns need,
-	// which would stretch the whole table to fit the banner.
+	// Banner rows: inside the table border, above column headers. One left-aligned line, as
+	// nvidia-smi prints it, when the versions fit; otherwise two centred lines, since the table
+	// would otherwise truncate the banner.
 	const std::string shortVer = xpum::compat::format("v{}.{}", XPUM_VERSION_MAJOR, XPUM_VERSION_MINOR);
 
 	// Take the first device that reports a version rather than device 0, whose value
@@ -426,41 +502,48 @@ TableBuilder cmdSmi::buildGpuTable(const std::vector<SmiDeviceStats> &devStats, 
 	const std::string umdVersion = umd.empty() ? "N/A" : umd;
 
 	const std::string kmd = firstReported(&SmiDeviceStats::kmdVersion);
-	const std::string kmdSegment = kmd.empty() ? "" : xpum::compat::format("    KMD Version: {}", kmd);
+	const std::string kmdSegment = kmd.empty() ? "" : xpum::compat::format("   KMD Version: {}", kmd);
 
-	table.addPreHeaderSpanRow(xpum::compat::format("Intel XPU-SMI {}{}", shortVer, kmdSegment), BorderStyle::None);
-	table.addPreHeaderSpanRow(xpum::compat::format("UMD Version: {}    Level Zero: {}", umdVersion, lzVersion));
+	const std::string title = xpum::compat::format("Intel XPU-SMI {}{}", shortVer, kmdSegment);
+	const std::string versions = xpum::compat::format("UMD Version: {}   Level Zero: {}", umdVersion, lzVersion);
+	const std::string oneLine = xpum::compat::format("{}   {}", title, versions);
+	constexpr size_t bannerWidth = GPU_COL0_WIDTH + 3 + GPU_COL1_WIDTH + 3 + GPU_COL2_WIDTH;
+	if (oneLine.size() <= bannerWidth) {
+		table.addPreHeaderSpanRow(oneLine, BorderStyle::Normal, Align::Left);
+	} else {
+		table.addPreHeaderSpanRow(title, BorderStyle::None);
+		table.addPreHeaderSpanRow(versions);
+	}
 
 	for (const auto &s : devStats) {
-		// Build col-0 lines: name wraps in 22-char chunks rather than truncating.
-		constexpr size_t kNameWidth = 22;
+		// Build col-0 lines: the name wraps at word boundaries rather than truncating.
+		const std::vector<std::string> nameLines = wrapName(s.name, nameWidth);
 		std::vector<std::string> col0Lines;
-		col0Lines.push_back(
-			xpum::compat::format("{:>3}  {:<{}}  Off", s.devIndex, s.name.substr(0, kNameWidth), kNameWidth));
-		for (size_t off = kNameWidth; off < s.name.size(); off += kNameWidth) {
-			col0Lines.push_back(xpum::compat::format("     {}", s.name.substr(off, kNameWidth)));
+		col0Lines.push_back(xpum::compat::format("{:>3}  {:<{}}{:>4}", s.devIndex, nameLines[0], nameWidth, "Off"));
+		for (size_t i = 1; i < nameLines.size(); ++i) {
+			col0Lines.push_back(xpum::compat::format("     {}", nameLines[i]));
 		}
 
-		std::string bdfLine = xpum::compat::format("{:<16}  Off", s.pciBdf);
-		std::string eccLine = s.eccEnabled ? "Enabled" : "Disabled";
+		std::string bdfLine =
+			xpum::compat::format("{:>{}} {:>{}}", s.pciBdf, GPU_COL1_WIDTH - dispWidth - 1, "Off", dispWidth);
+		std::string eccLine = xpum::compat::format("{:>{}}", s.eccEnabled ? "Enabled" : "Disabled", GPU_COL2_WIDTH);
 
 		// Row 2: live telemetry per column
 		std::string tempStr = s.tempValid ? xpum::compat::format("{:.0f}C", s.gpuTempC) : "N/A";
 		std::string fanStr = s.fanValid ? fmtFan(s.fanSpeed, s.fanSpeedUnits) : "N/A";
 		std::string pwrStr = fmtPower(s.powerValid ? s.powerCurrentW : 0.0, s.powerTdpW);
 		std::string fanTempPwrLine =
-			xpum::compat::format("{:<{}}  {:>{}}  {}", fanStr, fanDisplayWidth, tempStr, tempDisplayWidth, pwrStr);
+			xpum::compat::format("{:<{}} {:>{}}{:>{}}", fanStr, fanWidth, tempStr, tempWidth, pwrStr, pwrWidth);
 		col0Lines.push_back(fanTempPwrLine);
 
 		// Align memory/util on the same line as fan/temp/pwr by padding cols 1 & 2
 		// with empty strings for each name-overflow line.
 		const size_t numWraps = col0Lines.size() - 2;
-		std::string memLine = s.memValid ? fmtMem(s.memUsedMiB, s.memTotalMiB) : "N/A";
-		// Left-pad util% to 10 chars so "Default" aligns under "Compute M." in the header
-		// Header extra: "GPU-Util  Compute M." → "Compute M." starts at col 10
-		// Data:          "{:<10}Default"        → "Default"    starts at col 10
+		std::string memLine =
+			xpum::compat::format("{:>{}}", s.memValid ? fmtMem(s.memUsedMiB, s.memTotalMiB) : "N/A", GPU_COL1_WIDTH);
 		std::string utilStr = s.utilValid ? xpum::compat::format("{:.0f}%", s.gpuUtilPercent) : "N/A";
-		std::string utilComputeLine = xpum::compat::format("{:<10}{}", utilStr, "Default");
+		std::string utilComputeLine =
+			xpum::compat::format("{:>{}}  {:>{}}", utilStr, utilWidth, "Default", computeWidth);
 		std::vector<std::string> col1Lines = {bdfLine};
 		col1Lines.insert(col1Lines.end(), numWraps, "");
 		col1Lines.push_back(memLine);
@@ -484,15 +567,20 @@ TableBuilder cmdSmi::buildGpuTable(const std::vector<SmiDeviceStats> &devStats, 
 
 /**
  * @brief Build and return the process listing table.
+ *
+ * Fixed-width columns, the same overall width as the GPU table; long process names are
+ * truncated with "...".
  */
 TableBuilder cmdSmi::buildProcessTable(const std::vector<devInfo> &deviceList)
 {
 	TableBuilder procTable = TableBuilder::bordered();
-	procTable.addColumn("GPU", Align::Right)
-		.addColumn("PID", Align::Right)
-		.addColumn("Type", Align::Center)
-		.addColumn("Process Name", Align::Left)
-		.addColumn("GPU Memory Usage", Align::Right);
+	procTable.disableAutoSizing();
+	procTable.addColumn("GPU", PROC_GPU_WIDTH, Align::Right)
+		.addColumn("PID", PROC_PID_WIDTH, Align::Right)
+		.addColumn("Type", PROC_TYPE_WIDTH, Align::Center)
+		.addColumn("Process Name", PROC_NAME_WIDTH, Align::Left)
+		.addColumn("GPU Memory", PROC_MEM_WIDTH, Align::Right);
+	procTable.setColumnExtraHeaders(4, {"Usage"});
 
 	// "Processes:" banner: left-aligned, no separator before column headers.
 	procTable.addPreHeaderSpanRow("Processes:", BorderStyle::None, Align::Left);

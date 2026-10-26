@@ -204,6 +204,21 @@ void cmdSmi::collectMemory(SmiDeviceStats &stats, devInfo *di)
 		stats.memTotalMiB = static_cast<double>(sizeBytes) / (1024.0 * 1024.0);
 	}
 
+	// An iGPU's memory is the host's RAM, so the module's own usage is the whole system's. Show what
+	// GPU clients have allocated instead: the sum of the process table's GPU memory.
+	if (di->dev->isIGPU()) {
+		std::vector<psInfo> procs;
+		if (cmdPs::getProcessList(di, procs) == ZE_RESULT_SUCCESS) {
+			uint64_t usedKiB = 0;
+			for (const auto &p : procs) {
+				usedKiB += p.memSize;
+			}
+			stats.memUsedMiB = static_cast<double>(usedKiB) / 1024.0;
+			stats.memValid = (stats.memTotalMiB > 0.0);
+		}
+		return;
+	}
+
 	uint64_t usedBytes = 0;
 	double utilPct = 0.0;
 	if (memHandler->getMemoryUsed(&usedBytes, &utilPct) == ZE_RESULT_SUCCESS) {

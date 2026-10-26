@@ -237,4 +237,55 @@ TEST_CASE("getMemoryChannels: rejects invalid or unavailable output")
 	CHECK(channels == 0);
 }
 
+// Tests for memory::moduleUsage(). The values are what the 26.35 compute runtime reported on an
+// Arc Pro B70 (device memory) and an Arc B390 iGPU (system memory), in MiB.
+
+namespace {
+constexpr uint64_t MIB = 1024ULL * 1024ULL;
+
+zes_mem_properties_t memProps(zes_mem_loc_t location, uint64_t physicalMiB)
+{
+	zes_mem_properties_t props = {};
+	props.location = location;
+	props.physicalSize = physicalMiB * MIB;
+	return props;
+}
+
+zes_mem_state_t memState(uint64_t sizeMiB, uint64_t freeMiB)
+{
+	zes_mem_state_t state = {};
+	state.size = sizeMiB * MIB;
+	state.free = freeMiB * MIB;
+	return state;
+}
+} // namespace
+
+TEST_CASE("moduleUsage: device memory is used = total - free")
+{
+	const MemoryModuleUsage usage = memory::moduleUsage(memProps(ZES_MEM_LOC_DEVICE, 32656), memState(32656, 11842));
+	CHECK(usage.totalBytes == 32656 * MIB);
+	CHECK(usage.usedBytes == (32656 - 11842) * MIB);
+}
+
+TEST_CASE("moduleUsage: device memory falls back to size when physicalSize is unknown")
+{
+	const MemoryModuleUsage usage = memory::moduleUsage(memProps(ZES_MEM_LOC_DEVICE, 0), memState(8192, 2048));
+	CHECK(usage.totalBytes == 8192 * MIB);
+	CHECK(usage.usedBytes == 6144 * MIB);
+}
+
+TEST_CASE("moduleUsage: system memory is all of RAM, used is what is not available")
+{
+	// size is the host's MemAvailable and free its MemFree; used must not exceed total.
+	const MemoryModuleUsage usage = memory::moduleUsage(memProps(ZES_MEM_LOC_SYSTEM, 31619), memState(12196, 3609));
+	CHECK(usage.totalBytes == 31619 * MIB);
+	CHECK(usage.usedBytes == (31619 - 12196) * MIB);
+}
+
+TEST_CASE("moduleUsage: used never exceeds total")
+{
+	CHECK(memory::moduleUsage(memProps(ZES_MEM_LOC_DEVICE, 1024), memState(1024, 2048)).usedBytes == 0);
+	CHECK(memory::moduleUsage(memProps(ZES_MEM_LOC_SYSTEM, 1024), memState(2048, 0)).usedBytes == 0);
+}
+
 #endif // __has_include(<doctest/doctest.h>)

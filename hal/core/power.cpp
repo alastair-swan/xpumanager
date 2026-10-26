@@ -632,12 +632,17 @@ ze_result_t power::getEnergyPerTile(std::map<uint32_t, std::pair<uint64_t, uint6
 	}
 
 	// An empty map is reported to callers as success with no data, which surfaces as N/A rather
-	// than as an error. Say so once, so that N/A is traceable to the absent domain.
+	// than as an error. Say so once, so that N/A is traceable to the absent domain. A device that
+	// enumerates no power domain at all (e.g. an iGPU) has nothing to trace, so keep that to debug.
 	if (tileEnergy.empty() && !perTileEnergyDomainMissingLogged) {
 		perTileEnergyDomainMissingLogged = true;
-		INFO("Device exposes no readable subdevice, card, package or GPU power domain out of {} enumerated; "
-			 "energy consumed reports N/A.\n",
-			 powerCount);
+		if (powerCount == 0) {
+			DBG("Device enumerates no power domain; energy consumed reports N/A.\n");
+		} else {
+			INFO("Device exposes no readable subdevice, card, package or GPU power domain out of {} enumerated; "
+				 "energy consumed reports N/A.\n",
+				 powerCount);
+		}
 	}
 
 	return ZE_RESULT_SUCCESS;

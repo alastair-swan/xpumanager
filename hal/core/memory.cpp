@@ -263,6 +263,28 @@ ze_result_t memory::getBandwidth(zes_mem_handle_t memhandle, zes_mem_bandwidth_t
 }
 
 /**
+ * @brief Works out a memory module's capacity and the part of it in use
+ *
+ * Device memory is used = total - free, with total the installed physicalSize when the driver
+ * reports one.
+ *
+ * System memory (an iGPU's) is the host's RAM. For it the runtime reports size as the host's
+ * MemAvailable and free as its MemFree, so size - free is merely reclaimable cache and
+ * physicalSize - free counts that cache as used. Report it as free(1) does instead: total is all
+ * of RAM and used is what is not available, physicalSize - size.
+ *
+ * @param properties Module properties, as returned by memory::getProperties()
+ * @param state Module state, as returned by memory::getState()
+ * @return The module's capacity and usage; used never exceeds total
+ */
+MemoryModuleUsage memory::moduleUsage(const zes_mem_properties_t &properties, const zes_mem_state_t &state)
+{
+	const uint64_t total = (properties.physicalSize > 0) ? properties.physicalSize : state.size;
+	const uint64_t notUsed = (properties.location == ZES_MEM_LOC_SYSTEM) ? state.size : state.free;
+	return {.totalBytes = total, .usedBytes = (total >= notUsed) ? (total - notUsed) : 0};
+}
+
+/**
  * @brief Calculates total memory size across all memory modules
  *
  * This function aggregates the total memory size from all available memory
@@ -289,7 +311,14 @@ ze_result_t memory::getMemorySize(uint64_t *size)
 			ERR("Failed to get Memory state for module {}. 0x{:X} ({})\n", i, result, l0_error_to_string(result));
 			return result;
 		}
-		*size += state.size;
+		// System memory's state.size is the host's MemAvailable, which moves; its capacity is all of RAM.
+		zes_mem_properties_t properties = {};
+		if (getProperties(memoryModules[i], &properties) == ZE_RESULT_SUCCESS &&
+			properties.location == ZES_MEM_LOC_SYSTEM) {
+			*size += moduleUsage(properties, state).totalBytes;
+		} else {
+			*size += state.size;
+		}
 	}
 	return result;
 }
@@ -516,11 +545,9 @@ ze_result_t memory::getMemoryUsed(uint64_t *used, double *utilization)
 			return result;
 		}
 
-		uint64_t moduleTotal = (properties.physicalSize == 0) ? state.size : properties.physicalSize;
-		uint64_t moduleUsed = (moduleTotal >= state.free) ? (moduleTotal - state.free) : 0;
-
-		totalUsedBytes += moduleUsed;
-		totalSizeBytes += moduleTotal;
+		const MemoryModuleUsage usage = moduleUsage(properties, state);
+		totalUsedBytes += usage.usedBytes;
+		totalSizeBytes += usage.totalBytes;
 	}
 
 	if (used != nullptr) {
@@ -768,12 +795,10 @@ ze_result_t memory::getSystemMemoryUsage(std::map<uint32_t, MemoryUsageData> &ti
 
 		foundSystemMemory = true;
 
-		// Guard against underflow if a driver ever reports free > size (matches getMemoryUsed()).
-		totalUsed += (state.size >= state.free) ? (state.size - state.free) : 0;
-
-		// Prefer physicalSize (hardware capacity) over state.size (allocatable memory) for accurate utilization.
-		// physicalSize may be 0 on older drivers or unsupported hardware, in which case fall back to state.size.
-		totalCapacity += (properties.physicalSize > 0) ? properties.physicalSize : state.size;
+		// Same accounting as getMemoryUsed(), so stats and the summary agree.
+		const MemoryModuleUsage usage = moduleUsage(properties, state);
+		totalUsed += usage.usedBytes;
+		totalCapacity += usage.totalBytes;
 	}
 
 	if (foundSystemMemory) {

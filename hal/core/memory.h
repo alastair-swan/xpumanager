@@ -99,6 +99,12 @@ struct MemoryUsageData
 	double utilizationPercent = 0.0; // utilization as percentage (0-100)
 };
 
+struct MemoryModuleUsage
+{
+	uint64_t totalBytes = 0; // module capacity in bytes
+	uint64_t usedBytes = 0;	 // part of it in use, never more than totalBytes
+};
+
 class LIBXPUM_API memory : public sysman
 {
 private:
@@ -139,6 +145,7 @@ public:
 	ze_result_t getMemorySpec(ze_device_handle_t coreDevice, MemorySpecData &spec);
 
 	static std::string_view sysmanMemoryTypeToString(zes_mem_type_t type);
+	static MemoryModuleUsage moduleUsage(const zes_mem_properties_t &properties, const zes_mem_state_t &state);
 	static std::string_view coreMemoryTypeToString(ze_device_memory_ext_type_t type);
 	static std::string resolveMemoryTypeName(zes_mem_type_t sysmanType, ze_device_memory_ext_type_t coreType);
 	static int32_t normalizeCriMemoryChannelCount(uint32_t pciDeviceId, zes_mem_type_t type, zes_mem_loc_t location,
